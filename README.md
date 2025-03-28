@@ -74,23 +74,6 @@ Clipception automatically identifies and extracts the most viral and engaging mo
 python process_video_v4.py /path/to/your/video.mp4
 ```
 
-### Web Application
-The repository includes a Flask application with Celery for background processing:
-
-1. **Start Redis** (required for Celery):
-   ```bash
-   redis-server
-   ```
-
-2. **Start Celery Worker**:
-   ```bash
-   celery -A app.celery worker --loglevel=info
-   ```
-
-3. **Run Flask App**:
-   ```bash
-   flask run
-   ```
 
 ## 📦 Output Structure
 
@@ -121,4 +104,4 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 - [OpenAI Whisper](https://github.com/openai/whisper) for transcription
 - [OpenRouter](https://openrouter.ai/) for AI processing
-- All the streamers who've helped test and improve Clipception
+- All the streamers and homies on twitch who've helped test and improve Clipception
