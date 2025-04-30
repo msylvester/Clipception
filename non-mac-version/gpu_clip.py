@@ -168,7 +168,8 @@ def parse_clip_data(input_string: str) -> list[dict]:
 
         return clips
     except (json.JSONDecodeError, ValueError) as e:
-        print(f"Error parsing clip data: {e}")
+        print(f"Error parsing clip data: {e}. Input string: {input_string}")
+
         return []
 
 def save_top_clips_json(clips: List[Dict], output_file: str, num_clips: int = 20) -> None:
