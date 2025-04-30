@@ -94,7 +94,7 @@ Rank clips by viral potential. Focus on measurable features in the data. No comm
                 messages=[
                     {
                         "role": "system",
-                        "content": "You are a helpful assistant that ranks video clips. Keep explanations brief and focused on virality potential."
+                        "content": "You are a helpful assistant that ranks video clips. Keep explanations brief and focused on virality potential. Follow the JSON format exactly."
                     },
                     {
                         "role": "user",
