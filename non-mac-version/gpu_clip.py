@@ -43,7 +43,7 @@ def process_chunk_gpu(chunk_data: Tuple[List[Dict], str, str, str, int]) -> List
         if torch.cuda.is_available():
             torch.cuda.set_device(0)
         
-        ranked_results = rank_clips_chunk(clips, api_key, site_url, site_name)
+        ranked_results : str = rank_clips_chunk(clips, api_key, site_url, site_name)
         if ranked_results:
             parsed_chunk = parse_clip_data(ranked_results)
             return parsed_chunk
@@ -78,14 +78,11 @@ For each clip, evaluate using:
 - "Quotable" phrases
 - Discussion potential
 
-For each clip, provide in this exact format:
-1. **Clip Name: "[TITLE]"**
-   Start: [START]s, End: [END]s
-   Score: [1-10]
-   Factors: [Key viral factors]
-   Platforms: [Recommended platforms]
+For each clip, return ONLY valid JSON following this exact structure:
+{{\"clips\": [{{\"name\": \"[TITLE]\", \"start\": \"[START]\", \"end\": \"[END]\", \"score\": [1-10], \"factors\": \"[Key viral factors]\", \"platforms\": \"[Recommended platforms]\"}}]}}
 
-Rank clips by viral potential. Focus on measurable features in the data."""
+Rank clips by viral potential. Focus on measurable features in the data. No commentary. No markdown. Pure JSON only.
+"""
 
     max_retries = 3
     retry_delay = 2
@@ -104,7 +101,7 @@ Rank clips by viral potential. Focus on measurable features in the data."""
                         "content": prompt
                     }
                 ],
-                temperature=1,
+                temperature=0.6,
                 max_tokens=1000
             )
             
@@ -155,50 +152,24 @@ def rank_all_clips_parallel(clips: List[Dict], api_key: str, site_url: str = "",
 def parse_clip_data(input_string: str) -> list[dict]:
     if not input_string:
         return []
-        
-    clips = []
-    current_clip = {}
-    lines = input_string.split('\n')
-    
-    for i in range(len(lines)):
-        line = lines[i].strip()
-        if not line:
-            continue
-            
-        if re.match(r'^\d+\.\s\*\*Clip Name:', line):
-            if current_clip:
-                clips.append(current_clip)
-                current_clip = {}
-                
-            name_match = re.search(r'Clip Name: "(.*?)"', line)
-            if name_match:
-                current_clip['name'] = name_match.group(1)
-                
-        elif 'Start:' in line and 'End:' in line:
-            time_match = re.search(r'Start: ([\d.]+)s, End: ([\d.]+)s', line)
-            if time_match:
-                current_clip['start'] = float(time_match.group(1))
-                current_clip['end'] = float(time_match.group(2))
-                
-        elif 'Score:' in line:
-            score_match = re.search(r'Score: (\d+)', line)
-            if score_match:
-                current_clip['score'] = int(score_match.group(1))
-                
-        elif 'Factors:' in line:
-            factors_match = re.search(r'Factors: (.+)', line)
-            if factors_match:
-                current_clip['factors'] = factors_match.group(1)
-                
-        elif 'Platforms:' in line:
-            platforms_match = re.search(r'Platforms: (.+)', line)
-            if platforms_match:
-                current_clip['platforms'] = platforms_match.group(1)
-    
-    if current_clip:
-        clips.append(current_clip)
-    
-    return clips
+    cleaned_str = input_string.replace("```json", "").replace("```", "").strip()
+    try:
+        clips = json.loads(cleaned_str)["clips"]
+
+        # Filter out invalid clip structures
+        clips = [
+            clip
+            for clip in clips
+            if all(
+                key in clip
+                for key in ("name", "start", "end", "score", "factors", "platforms")
+            )
+        ]
+
+        return clips
+    except (json.JSONDecodeError, ValueError) as e:
+        print(f"Error parsing clip data: {e}")
+        return []
 
 def save_top_clips_json(clips: List[Dict], output_file: str, num_clips: int = 20) -> None:
     top_clips = clips[:num_clips]
