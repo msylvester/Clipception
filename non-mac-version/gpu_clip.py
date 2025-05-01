@@ -104,7 +104,7 @@ Rank clips by viral potential. Focus on measurable features in the data. No comm
                 response_format = {
                     'type': 'json_object'
                 },
-                temperature=0.6,
+                temperature=1,
                 max_tokens=1000
             )
             
