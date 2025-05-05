@@ -108,8 +108,8 @@ def extract_audio_features(audio_segment, start_time, end_time):
 def extract_audio(video_path):
     """Extract audio from video using ffmpeg"""
     video_file = Path(video_path)
-    # Ensure the audio file is saved in a predictable location, perhaps a dedicated 'temp' dir
-    temp_dir = Path("temp_audio")
+    # Use TEMP_FOLDER from config for audio file
+    temp_dir = Path(config.TEMP_FOLDER)
     temp_dir.mkdir(exist_ok=True)
     audio_path = temp_dir / video_file.with_suffix('.wav').name
 
@@ -276,8 +276,8 @@ def process_video(video_path, model_size="base", min_duration=15.0):
     device = check_gpu()
 
     video_file = Path(video_path)
-    # Save transcription in a predictable output directory
-    output_dir = Path("output_transcriptions")
+    # Save transcription in the output directory defined in config
+    output_dir = Path(config.TRANSCRIPTION_OUTPUT_FOLDER)
     output_dir.mkdir(exist_ok=True)
     transcription_path = output_dir / video_file.with_suffix('.enhanced_transcription.json').name
 
@@ -322,27 +322,39 @@ def on_message(ch, method, properties, body, connection, model_size, min_duratio
     print(f" [x] Received video path: {video_path}")
 
     output_channel = None # Initialize to ensure it's defined
+    output_connection = None # Initialize output connection
 
     try:
         # Process the video
         transcription_file_path = process_video(video_path, model_size, min_duration)
 
-        # Publish the result to the next queue
-        output_connection = pika.BlockingConnection(pika.ConnectionParameters(host=config.RABBITMQ_HOST))
+        # Publish the result to the next queue (TRANSCRIPTION_QUEUE from config)
+        # Establish a new connection for publishing results (safer in callbacks)
+        credentials = None
+        if hasattr(config, 'RABBITMQ_USER') and hasattr(config, 'RABBITMQ_PASS'):
+             credentials = pika.PlainCredentials(config.RABBITMQ_USER, config.RABBITMQ_PASS)
+        output_connection_params = pika.ConnectionParameters(
+            host=config.RABBITMQ_HOST,
+            port=config.RABBITMQ_PORT,
+            virtual_host=config.RABBITMQ_VHOST,
+            credentials=credentials
+        )
+        output_connection = pika.BlockingConnection(output_connection_params)
         output_channel = output_connection.channel()
+        # Declare the output queue (TRANSCRIPTION_QUEUE) to ensure it exists
         output_channel.queue_declare(queue=config.TRANSCRIPTION_QUEUE, durable=True)
 
         output_channel.basic_publish(
             exchange='',
-            routing_key=config.TRANSCRIPTION_QUEUE,
+            routing_key=config.TRANSCRIPTION_QUEUE, # Use queue name from config
             body=transcription_file_path.encode('utf-8'),
             properties=pika.BasicProperties(
                 delivery_mode=2,  # make message persistent
             ))
         print(f" [x] Sent transcription path '{transcription_file_path}' to queue '{config.TRANSCRIPTION_QUEUE}'")
-        output_connection.close()
 
-        # Acknowledge the message was processed successfully
+
+        # Acknowledge the message was processed successfully *after* publishing result
         ch.basic_ack(delivery_tag=method.delivery_tag)
         print(f" [x] Acknowledged message for {video_path}")
 
@@ -354,10 +366,19 @@ def on_message(ch, method, properties, body, connection, model_size, min_duratio
         print(f"Error processing message for {video_path}: {e}")
         # Negative acknowledgement to potentially requeue the message
         # Set requeue=False if processing this message will always fail
-        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
-        # Close the output channel if it was opened
-        if output_channel and not output_connection.is_closed:
-            output_connection.close()
+        try:
+            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+            print(f" [!] Negatively acknowledged message for {video_path}")
+        except Exception as nack_e:
+            print(f"Error during NACK: {nack_e}. Message might remain unacknowledged.")
+    finally:
+        # Ensure the output connection is closed if it was opened
+        if output_channel and output_connection and not output_connection.is_closed:
+            try:
+                output_connection.close()
+                print("Output RabbitMQ connection closed.")
+            except Exception as close_e:
+                print(f"Error closing output RabbitMQ connection: {close_e}")
 
 
 def main():
@@ -368,52 +389,84 @@ def main():
     connection = None
     while connection is None:
         try:
-            connection = pika.BlockingConnection(pika.ConnectionParameters(host=config.RABBITMQ_HOST))
+            credentials = None
+            if hasattr(config, 'RABBITMQ_USER') and hasattr(config, 'RABBITMQ_PASS'):
+                 credentials = pika.PlainCredentials(config.RABBITMQ_USER, config.RABBITMQ_PASS)
+
+            connection_params = pika.ConnectionParameters(
+                host=config.RABBITMQ_HOST,
+                port=config.RABBITMQ_PORT,
+                virtual_host=config.RABBITMQ_VHOST,
+                credentials=credentials,
+                heartbeat=600,
+                blocked_connection_timeout=300
+            )
+            connection = pika.BlockingConnection(connection_params)
             channel = connection.channel()
-            print("Successfully connected to RabbitMQ.")
+            print(f"Successfully connected to RabbitMQ at {config.RABBITMQ_HOST}.")
             break
         except pika.exceptions.AMQPConnectionError as e:
             print(f"Failed to connect to RabbitMQ at {config.RABBITMQ_HOST}. Retrying in 5 seconds... Error: {e}")
             time.sleep(5)
+        except Exception as e:
+            print(f"An unexpected error occurred during RabbitMQ connection: {e}")
+            print("Exiting.")
+            sys.exit(1)
 
 
-    # Declare the input queue (where video paths come from)
+    # Declare the input queue (VIDEO_QUEUE from config)
     channel.queue_declare(queue=config.VIDEO_QUEUE, durable=True)
-    # Declare the output queue (where transcription paths go)
+    # Declare the output queue (TRANSCRIPTION_QUEUE from config) - good practice to declare both
     channel.queue_declare(queue=config.TRANSCRIPTION_QUEUE, durable=True)
 
-    print(' [*] Transcription Agent waiting for video paths. To exit press CTRL+C')
+    print(f' [*] Transcription Agent waiting for video paths on queue "{config.VIDEO_QUEUE}". To exit press CTRL+C')
 
     # --- Configuration ---
     # Could potentially get these from env vars or config file later
     model_size = os.getenv("WHISPER_MODEL_SIZE", "base")
     min_duration = float(os.getenv("MIN_SEGMENT_DURATION", 15.0))
+    print(f"Config: Whisper Model={model_size}, Min Segment Duration={min_duration}s")
+
 
     # Set Quality of Service: Don't dispatch a new message until the worker has ack'd the previous one
     channel.basic_qos(prefetch_count=1)
 
     # Create a partial function for the callback to include connection and config
+    # Pass the main connection object (used for consuming/acking)
     on_message_callback = functools.partial(on_message, connection=connection, model_size=model_size, min_duration=min_duration)
 
-    # Start consuming messages
+    # Start consuming messages from the VIDEO_QUEUE
     channel.basic_consume(queue=config.VIDEO_QUEUE, on_message_callback=on_message_callback)
 
     try:
         channel.start_consuming()
     except KeyboardInterrupt:
-        print("Interrupted. Closing connection.")
-        if connection and connection.is_open:
-            connection.close()
+        print("\nInterrupted. Closing connection.")
+    except pika.exceptions.ConnectionClosedByBroker:
+        print("Connection closed by broker. Check RabbitMQ server and configuration.")
+    except pika.exceptions.AMQPChannelError as err:
+        print(f"Caught a channel error: {err}, stopping consumption.")
+    except pika.exceptions.AMQPConnectionError:
+        print("Connection was closed. Attempting to reconnect or shutdown needed.")
     except Exception as e:
-        print(f"An unexpected error occurred: {e}")
-        if connection and connection.is_open:
-            connection.close()
-        sys.exit(1)
+        print(f"An unexpected error occurred during consumption: {e}")
     finally:
+        print("Closing RabbitMQ connection...")
         if connection and connection.is_open:
-            connection.close()
-            print("RabbitMQ connection closed.")
+            try:
+                connection.close()
+                print("RabbitMQ connection closed.")
+            except Exception as close_e:
+                 print(f"Error closing RabbitMQ connection: {close_e}")
+        print("--- Transcription Agent Stopped ---")
+        sys.exit(0) # Exit cleanly
 
 
 if __name__ == "__main__":
+    # Ensure output/temp directories exist
+    try:
+        Path(config.TRANSCRIPTION_OUTPUT_FOLDER).mkdir(parents=True, exist_ok=True)
+        Path(config.TEMP_FOLDER).mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        print(f"Warning: Could not create necessary directories: {e}")
     main()

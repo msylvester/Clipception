@@ -43,9 +43,20 @@ def send_video_to_queue(video_path: str):
 
     for attempt in range(retries):
         try:
-            connection = pika.BlockingConnection(
-                pika.ConnectionParameters(host=config.RABBITMQ_HOST)
+            # Add credentials if defined in config (optional)
+            credentials = None
+            if hasattr(config, 'RABBITMQ_USER') and hasattr(config, 'RABBITMQ_PASS'):
+                 credentials = pika.PlainCredentials(config.RABBITMQ_USER, config.RABBITMQ_PASS)
+
+            connection_params = pika.ConnectionParameters(
+                host=config.RABBITMQ_HOST,
+                port=config.RABBITMQ_PORT,
+                virtual_host=config.RABBITMQ_VHOST,
+                credentials=credentials,
+                heartbeat=600,
+                blocked_connection_timeout=300
             )
+            connection = pika.BlockingConnection(connection_params)
             channel = connection.channel()
             print("Successfully connected to RabbitMQ.")
 
@@ -56,7 +67,7 @@ def send_video_to_queue(video_path: str):
             # Send the video path as a message body, encoded in UTF-8
             channel.basic_publish(
                 exchange='', # Default exchange
-                routing_key=config.VIDEO_QUEUE, # The name of the queue
+                routing_key=config.VIDEO_QUEUE, # Use the queue name from config
                 body=absolute_video_path.encode('utf-8'),
                 properties=pika.BasicProperties(
                     delivery_mode=2,  # Make message persistent
@@ -99,6 +110,7 @@ def main():
     try:
         send_video_to_queue(args.video_path)
         print("--- Orchestration Task Submitted Successfully ---")
+        # Use the correct queue name from config in the success message
         print(f"The video path has been sent to the queue: '{config.VIDEO_QUEUE}'.")
         print("Ensure the corresponding agent (e.g., transcription_agent) is running to process the message.")
     except FileNotFoundError as e:
