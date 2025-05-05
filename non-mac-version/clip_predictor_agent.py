@@ -3,11 +3,13 @@ import json
 import os
 import sys
 import time
+import argparse  # Added for command line arguments
 from typing import List, Dict, Tuple
 import torch
 import numpy as np
 import pika
 import functools
+import threading
 import atexit
 from pathlib import Path
 
@@ -268,8 +270,19 @@ def on_message(ch, method, properties, body, connection):
     """Callback function to process messages from RabbitMQ."""
     transcription_path = body.decode('utf-8')
     print(f" [x] Received transcription path: {transcription_path}")
+    stop_event = threading.Event()
+    def heartbeat_runner(conn, stop_event):
+        while not stop_event.is_set():
+            time.sleep(1)
+            try:
+                conn.process_data_events()
+            except Exception as hb_e:
+                print(f"Heartbeat error: {hb_e}")
+    heartbeat_thread = threading.Thread(target=heartbeat_runner, args=(connection, stop_event))
+    heartbeat_thread.start()
 
     output_channel = None # Initialize to ensure it's defined
+    output_connection = None # Initialize to ensure it's defined
 
     try:
         # Process the transcription
@@ -304,11 +317,39 @@ def on_message(ch, method, properties, body, connection):
         # Set requeue=False if processing this message will always fail
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
         # Close the output channel if it was opened
-        if output_channel and not output_connection.is_closed:
+        if output_connection and output_channel and not output_connection.is_closed:
             output_connection.close()
+    finally:
+        # Stop the heartbeat thread
+        stop_event.set()
+        heartbeat_thread.join(timeout=2)
 
 def main():
     """Main function to connect to RabbitMQ and start consuming messages."""
+    # Set up command line arguments
+    parser = argparse.ArgumentParser(description='Clip predictor agent for ranking video clips')
+    parser.add_argument('--purge', action='store_true', help='Purge queues before starting')
+    parser.add_argument('--process', metavar='TRANSCRIPTION_PATH', help='Process a specific transcription file')
+    parser.add_argument('--num-clips', type=int, default=20, 
+                        help='Number of top clips to save (default: 20)')
+    parser.add_argument('--listen-only', action='store_true', 
+                        help='Just listen for new messages (ignore existing ones)')
+    args = parser.parse_args()
+    
+    # Process a specific transcription file if requested
+    if args.process:
+        try:
+            print(f"Processing single transcription file: {args.process}")
+            clips_path = process_transcription(
+                args.process, 
+                num_clips=args.num_clips
+            )
+            print(f"Single file processing complete. Ranked clips saved to {clips_path}")
+            return
+        except Exception as e:
+            print(f"Error processing transcription file: {e}")
+            return
+    
     # --- RabbitMQ Setup ---
     connection = None
     max_retries = 10
@@ -320,7 +361,7 @@ def main():
         try:
             connection = pika.BlockingConnection(pika.ConnectionParameters(host=config.RABBITMQ_HOST))
             channel = connection.channel()
-            print("Successfully connected to RabbitMQ.")
+            print(f"Successfully connected to RabbitMQ at {config.RABBITMQ_HOST}.")
             break
         except pika.exceptions.AMQPConnectionError as e:
             print(f"Failed to connect to RabbitMQ (attempt {attempt+1}/{max_retries}). Retrying in {retry_delay} seconds... Error: {e}")
@@ -330,13 +371,43 @@ def main():
             else:
                 print("Error: Could not connect to RabbitMQ after several retries.")
                 sys.exit(1)
-                
+    
     # Declare the input queue (where transcription paths come from)
     channel.queue_declare(queue=config.TRANSCRIPTION_QUEUE, durable=True)
     # Declare the output queue (where ranked clips paths go)
     channel.queue_declare(queue=config.CLIPPING_QUEUE, durable=True)
+    
+    # Purge queues if requested
+    if args.purge:
+        channel.queue_purge(queue=config.TRANSCRIPTION_QUEUE)
+        print(f"Purged all messages from {config.TRANSCRIPTION_QUEUE}")
+        channel.queue_purge(queue=config.CLIPPING_QUEUE)
+        print(f"Purged all messages from {config.CLIPPING_QUEUE}")
+    
+    # Handle listen-only mode - create a new queue just for this session
+    if args.listen_only:
+        # Create a temporary queue that receives copies of new messages only
+        result = channel.queue_declare(queue='', exclusive=True)
+        temp_queue_name = result.method.queue
+        
+        # Bind to the same exchange but only get new messages
+        channel.queue_bind(
+            exchange='amq.fanout',  # Use the fanout exchange
+            queue=temp_queue_name
+        )
+        
+        print(f"Listen-only mode active. Listening on temporary queue: {temp_queue_name}")
+        print("This instance will only process new messages and ignore existing ones.")
+        
+        # Use the temporary queue for consumption
+        queue_to_consume = temp_queue_name
+    else:
+        # Normal mode - consume from the regular queue
+        queue_to_consume = config.TRANSCRIPTION_QUEUE
 
-    print(f' [*] Clip Predictor Agent waiting for transcription paths on {config.TRANSCRIPTION_QUEUE}. To exit press CTRL+C')
+    print(f' [*] Clip Predictor Agent waiting for transcription paths on queue: {queue_to_consume}')
+    print(f' [*] Will save top {args.num_clips} clips for each transcription')
+    print(' [*] To exit press CTRL+C')
 
     # Set Quality of Service: Don't dispatch a new message until the worker has ack'd the previous one
     channel.basic_qos(prefetch_count=1)
@@ -345,7 +416,7 @@ def main():
     on_message_callback = functools.partial(on_message, connection=connection)
 
     # Start consuming messages
-    channel.basic_consume(queue=config.TRANSCRIPTION_QUEUE, on_message_callback=on_message_callback)
+    channel.basic_consume(queue=queue_to_consume, on_message_callback=on_message_callback)
 
     try:
         channel.start_consuming()

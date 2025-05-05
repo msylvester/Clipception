@@ -35,6 +35,7 @@ import atexit
 import sys
 import pika # Added for RabbitMQ
 import functools # Added for callback handling
+import argparse  # Added for command line arguments
 
 # Import config
 try:
@@ -322,6 +323,7 @@ def on_message(ch, method, properties, body, connection, model_size, min_duratio
     print(f" [x] Received video path: {video_path}")
 
     output_channel = None # Initialize to ensure it's defined
+    output_connection = None # Initialize to ensure it's defined
 
     try:
         # Process the video
@@ -356,13 +358,41 @@ def on_message(ch, method, properties, body, connection, model_size, min_duratio
         # Set requeue=False if processing this message will always fail
         ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
         # Close the output channel if it was opened
-        if output_channel and not output_connection.is_closed:
+        if output_connection and output_channel and not output_connection.is_closed:
             output_connection.close()
 
 
 def main():
+    # Set up command line arguments
+    parser = argparse.ArgumentParser(description='Transcription agent for processing videos')
+    parser.add_argument('--purge', action='store_true', help='Purge queues before starting')
+    parser.add_argument('--process', metavar='VIDEO_PATH', help='Process a specific video file')
+    parser.add_argument('--model', default=os.getenv("WHISPER_MODEL_SIZE", "base"), 
+                        help='Whisper model size to use (tiny, base, small, medium, large)')
+    parser.add_argument('--min-duration', type=float, 
+                        default=float(os.getenv("MIN_SEGMENT_DURATION", 15.0)),
+                        help='Minimum segment duration in seconds')
+    parser.add_argument('--listen-only', action='store_true', 
+                        help='Just listen for new messages (ignore existing ones)')
+    args = parser.parse_args()
+    
     # Register cleanup function to run at exit
     atexit.register(cleanup_files)
+    
+    # Process a specific video file if requested
+    if args.process:
+        try:
+            print(f"Processing single video: {args.process}")
+            transcription_file_path = process_video(
+                args.process, 
+                model_size=args.model, 
+                min_duration=args.min_duration
+            )
+            print(f"Single file processing complete. Transcription saved to {transcription_file_path}")
+            return
+        except Exception as e:
+            print(f"Error processing video: {e}")
+            return
 
     # --- RabbitMQ Setup ---
     connection = None
@@ -370,33 +400,62 @@ def main():
         try:
             connection = pika.BlockingConnection(pika.ConnectionParameters(host=config.RABBITMQ_HOST))
             channel = connection.channel()
-            print("Successfully connected to RabbitMQ.")
+            print(f"Successfully connected to RabbitMQ at {config.RABBITMQ_HOST}.")
             break
         except pika.exceptions.AMQPConnectionError as e:
             print(f"Failed to connect to RabbitMQ at {config.RABBITMQ_HOST}. Retrying in 5 seconds... Error: {e}")
             time.sleep(5)
 
-
     # Declare the input queue (where video paths come from)
     channel.queue_declare(queue=config.VIDEO_QUEUE, durable=True)
     # Declare the output queue (where transcription paths go)
     channel.queue_declare(queue=config.TRANSCRIPTION_QUEUE, durable=True)
+    
+    # Purge queues if requested
+    if args.purge:
+        channel.queue_purge(queue=config.VIDEO_QUEUE)
+        print(f"Purged all messages from {config.VIDEO_QUEUE}")
+        channel.queue_purge(queue=config.TRANSCRIPTION_QUEUE)
+        print(f"Purged all messages from {config.TRANSCRIPTION_QUEUE}")
+    
+    # Handle listen-only mode - create a new queue just for this session
+    if args.listen_only:
+        # Create a temporary queue that receives copies of new messages only
+        result = channel.queue_declare(queue='', exclusive=True)
+        temp_queue_name = result.method.queue
+        
+        # Bind to the same exchange but only get new messages
+        channel.queue_bind(
+            exchange='amq.fanout',  # Use the fanout exchange
+            queue=temp_queue_name
+        )
+        
+        print(f"Listen-only mode active. Listening on temporary queue: {temp_queue_name}")
+        print("This instance will only process new messages and ignore existing ones.")
+        
+        # Use the temporary queue for consumption
+        queue_to_consume = temp_queue_name
+    else:
+        # Normal mode - consume from the regular queue
+        queue_to_consume = config.VIDEO_QUEUE
 
-    print(' [*] Transcription Agent waiting for video paths. To exit press CTRL+C')
-
-    # --- Configuration ---
-    # Could potentially get these from env vars or config file later
-    model_size = os.getenv("WHISPER_MODEL_SIZE", "base")
-    min_duration = float(os.getenv("MIN_SEGMENT_DURATION", 15.0))
+    print(f' [*] Transcription Agent waiting for video paths on queue: {queue_to_consume}')
+    print(f' [*] Using model: {args.model}, minimum segment duration: {args.min_duration}s')
+    print(' [*] To exit press CTRL+C')
 
     # Set Quality of Service: Don't dispatch a new message until the worker has ack'd the previous one
     channel.basic_qos(prefetch_count=1)
 
     # Create a partial function for the callback to include connection and config
-    on_message_callback = functools.partial(on_message, connection=connection, model_size=model_size, min_duration=min_duration)
+    on_message_callback = functools.partial(
+        on_message, 
+        connection=connection, 
+        model_size=args.model, 
+        min_duration=args.min_duration
+    )
 
     # Start consuming messages
-    channel.basic_consume(queue=config.VIDEO_QUEUE, on_message_callback=on_message_callback)
+    channel.basic_consume(queue=queue_to_consume, on_message_callback=on_message_callback)
 
     try:
         channel.start_consuming()

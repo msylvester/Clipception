@@ -9,6 +9,7 @@ RABBITMQ_VHOST = '/'  # default virtual host
 DOWNLOAD_QUEUE = 'download_queue'  # queue for video download tasks
 TRANSCRIPTION_QUEUE = 'transcription_queue'  # queue for transcription tasks
 CLIP_QUEUE = 'clip_queue'  # queue for clip extraction tasks
+CLIPPING_QUEUE= 'clipping_queue' ## queue that the clip predictor agent subscribes to
 
 # Redis settings (since you're using Redis in celeryconfig.py)
 REDIS_HOST = 'localhost'
