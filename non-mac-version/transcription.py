@@ -155,7 +155,7 @@ def combine_segments(segments):
         }
     }
 
-def transcribe_with_features(model, audio_path, device, min_duration=15.0):
+def transcribe_with_features(model, audio_path, device, min_duration=30.0):
     """Get transcription with timestamps and audio features"""
     print("Generating enhanced transcription...")
     enhanced_segments = []
@@ -258,7 +258,7 @@ def main():
     parser.add_argument('--model', default='base', 
                       choices=['tiny', 'base', 'small', 'medium', 'large', 'turbo'],
                       help='Whisper model size to use')
-    parser.add_argument('--min-duration', type=float, default=15.0,
+    parser.add_argument('--min-duration', type=float, default=30.0,
                       help='Minimum duration in seconds for combined segments')
     
     args = parser.parse_args()
