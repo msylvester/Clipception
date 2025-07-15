@@ -81,13 +81,13 @@ For each clip, evaluate using:
 - Discussion potential
 
 For each clip, provide in this exact format:
-1. **Clip Name: "[TITLE]"**
+1. **Clip Name: "Descriptive Title Based On Content"**
    Start: [START]s, End: [END]s
    Score: [1-10]
    Factors: [Key viral factors]
    Platforms: [Recommended platforms]
 
-Rank clips by viral potential. Focus on measurable features in the data."""
+Create descriptive titles that capture the essence of what's being discussed in each clip. Use the actual text content to create meaningful names. Rank clips by viral potential."""
 
     max_retries = 3
     retry_delay = 2
@@ -144,7 +144,51 @@ def rank_all_clips_parallel(clips: List[Dict], api_key: str, site_url: str = "",
                 print(f"Warning: Chunk processing failed: {str(e)}")
 
     pbar.close()
+    
+    # Post-process to ensure all clips have descriptive names
+    for clip in all_ranked_clips:
+        if not clip.get('name'):
+            # Find the original clip text to create a descriptive name
+            clip_text = find_clip_text(clips, clip.get('start', 0), clip.get('end', 0))
+            clip['name'] = create_descriptive_name(clip_text, clip.get('start', 0))
+    
     return sorted(all_ranked_clips, key=lambda x: x.get('score', 0), reverse=True)
+
+def create_descriptive_name(clip_text: str, start_time: float) -> str:
+    """Create a descriptive name from clip text"""
+    if not clip_text:
+        return f"clip_{start_time:.0f}s"
+    
+    # Clean and truncate text for filename
+    words = clip_text.strip().split()[:8]  # First 8 words
+    clean_words = []
+    
+    for word in words:
+        # Remove punctuation and keep only alphanumeric
+        clean_word = re.sub(r'[^\w]', '', word)
+        if clean_word and len(clean_word) > 1:  # Skip single characters
+            clean_words.append(clean_word.capitalize())
+    
+    if clean_words:
+        name = " ".join(clean_words)
+        # Limit length
+        if len(name) > 50:
+            name = name[:47] + "..."
+        return name
+    else:
+        return f"clip_{start_time:.0f}s"
+
+def find_clip_text(clips_data: List[Dict], start_time: float, end_time: float) -> str:
+    """Find the text content for a clip based on timestamps"""
+    for clip in clips_data:
+        clip_start = clip.get('start', 0)
+        clip_end = clip.get('end', 0)
+        
+        # Check if timestamps match (with small tolerance)
+        if abs(clip_start - start_time) < 1.0 and abs(clip_end - end_time) < 1.0:
+            return clip.get('text', '')
+    
+    return ''
 
 def parse_clip_data(input_string: str) -> List[Dict]:
     """Parse the model's output into structured clip data."""
@@ -160,13 +204,19 @@ def parse_clip_data(input_string: str) -> List[Dict]:
         if not line:
             continue
 
+        # Look for clip name patterns (more flexible matching)
         if re.match(r'^\d+\.\s\*\*Clip Name:', line):
             if current_clip:
                 clips.append(current_clip)
                 current_clip = {}
-            match = re.search(r'Clip Name: "(.*?)"', line)
-            if match:
-                current_clip['name'] = match.group(1)
+            
+            # Try multiple name extraction patterns
+            name_match = re.search(r'Clip Name: ["\']([^"\']+)["\']', line)
+            if not name_match:
+                name_match = re.search(r'Clip Name: ([^*]+)', line)
+            
+            if name_match:
+                current_clip['name'] = name_match.group(1).strip()
 
         elif 'Start:' in line and 'End:' in line:
             match = re.search(r'Start: ([\d.]+)s, End: ([\d.]+)s', line)
