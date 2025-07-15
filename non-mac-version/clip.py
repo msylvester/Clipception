@@ -11,8 +11,19 @@ def extract_clip(input_file, output_dir, clip_data):
     Extract a single clip based on the provided clip data
     """
     try:
+        # Get clip name with fallback options
+        clip_name = clip_data.get("name")
+        if not clip_name:
+            # Fallback to generating name from timestamps
+            start_time = clip_data.get("start", 0)
+            end_time = clip_data.get("end", 0)
+            clip_name = f"clip_{start_time:.1f}s_to_{end_time:.1f}s"
+        
         # Create sanitized filename from clip name
-        safe_name = "".join(c for c in clip_data["name"] if c.isalnum() or c in (' ', '-', '_')).rstrip()
+        safe_name = "".join(c for c in str(clip_name) if c.isalnum() or c in (' ', '-', '_')).rstrip()
+        if not safe_name:  # If sanitization results in empty string
+            safe_name = f"clip_{len(os.listdir(output_dir)) + 1}"
+        
         output_file = os.path.join(output_dir, f"{safe_name}.mp4")
         
         # Load the video file
@@ -23,7 +34,7 @@ def extract_clip(input_file, output_dir, clip_data):
         end_time = clip_data.get("end")
         
         if start_time is None or end_time is None:
-            return False, f"Missing start or end time for clip: {clip_data['name']}"
+            return False, f"Missing start or end time for clip: {clip_name}"
         
         # Extract the clip using start and end times from JSON
         clip = video.subclipped(start_time, end_time)
@@ -59,10 +70,11 @@ def process_clips(input_file, output_dir, json_file, min_score=0, remove_vod=Fal
         for clip in data.get("top_clips", []):
             if clip.get("score", 0) >= min_score:
                 success, result = extract_clip(input_file, output_dir, clip)
+                clip_name = clip.get("name", f"clip_{clip.get('start', 0):.1f}s")
                 if success:
-                    successful_clips.append((clip["name"], result))
+                    successful_clips.append((clip_name, result))
                 else:
-                    failed_clips.append((clip["name"], result))
+                    failed_clips.append((clip_name, result))
         
         # Print summary
         print(f"\nExtraction Summary:")
