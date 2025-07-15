@@ -1,5 +1,5 @@
 
-from moviepy.editor import VideoFileClip
+from moviepy import VideoFileClip
 import argparse
 import json
 import sys
@@ -26,7 +26,7 @@ def extract_clip(input_file, output_dir, clip_data):
             return False, f"Missing start or end time for clip: {clip_data['name']}"
         
         # Extract the clip using start and end times from JSON
-        clip = video.subclip(start_time, end_time)
+        clip = video.subclipped(start_time, end_time)
         
         # Write the clip to a new file
         clip.write_videofile(output_file, codec='libx264')
