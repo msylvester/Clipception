@@ -95,7 +95,7 @@ Rank clips by viral potential. Focus on measurable features in the data."""
     for attempt in range(max_retries):
         try:
             completion = client.chat.completions.create(
-                model="anthropic/claude-3.5-sonnet",
+                model="anthropic/claude-sonnet-4",
                 messages=[
                     {
                         "role": "system",
